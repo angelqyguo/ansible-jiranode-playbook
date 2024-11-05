@@ -1,0 +1,51 @@
+---
+- name: Initialise Jira Node
+  hosts: localhost
+  connection: local
+  become: true
+  become_user: jira
+  vars:
+    key_vault_uri: "{{ key_vault_uri }}"
+  tasks:
+    - name: Look up secrets for on-going ansible play
+      ansible.builtin.set_fact:
+        jira_db_password: "{{ lookup('azure.azcollection.azure_keyvault_secret', 'dbpassword', vault_url=key_vault_uri) }}"
+        jira_db_username: "{{ lookup('azure.azcollection.azure_keyvault_secret', 'dbusername', vault_url=key_vault_uri) }}"
+        jira_sa_name: "{{ lookup('azure.azcollection.azure_keyvault_secret', 'jirastoragename', vault_url=key_vault_uri) }}"
+        jira_sa_access_key: "{{ lookup('azure.azcollection.azure_keyvault_secret', 'jirastoragekey', vault_url=key_vault_uri) }}"
+    - name: Set up SMB client credentials folder
+      ansible.builtin.file:
+        path: /etc/smbcredentials
+        state: directory
+        mode: '0600'
+      become: true
+      become_user: root
+    - name: Set up shared file mount credentials file
+      ansible.builtin.template:
+        src: templates/sharefs.cred.j2
+        dest: /etc/smbcredentials/sharefs.cred
+      become: true
+      become_user: root
+    - name: Mount JIRA shared home
+      ansible.posix.mount:
+        src: "//{{ jira_sa_name }}.file.core.windows.net/{{ fs_name }}"
+        path: /opt/jirasoftware-home
+        opts: "credentials=/etc/smbcredentials/sharefs.cred,serverino,nosharesock,actimeo=30,mfsymlinks,gid=jira,uid=jira"
+        fstype: cifs
+        state: mounted
+      become: true
+      become_user: root
+    - name: Set up dbconfig in jira home
+      ansible.builtin.template:
+        src: templates/dbconfig.xml.j2
+        dest: /opt/jirasoftware-home/dbconfig.xml
+    - name: Start jira application
+      ansible.builtin.shell: >
+        nohup /opt/jirasoftware/jira-latest/bin/start-jira.sh </dev/null >/dev/null 2>&1 &
+      environment:
+        JIRA_HOME: /opt/jirasoftware-home
+      register: output
+      changed_when: output.rc != 0
+    - name: Print command output
+      ansible.builtin.debug:
+        msg: "{{ output }}"
